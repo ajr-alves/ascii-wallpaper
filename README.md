@@ -57,7 +57,7 @@ Nothing else needs installing; it uses only the Python standard library.
 ## Install
 
 ```powershell
-git clone https://github.com/<you>/ascii-wallpaper.git
+git clone https://github.com/ajr-alves/ascii-wallpaper.git
 cd ascii-wallpaper
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
