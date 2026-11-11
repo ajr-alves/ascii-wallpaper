@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+wallpaper.log
+# your personal settings; created by the tray menu, defaults live in the code
+config.json
