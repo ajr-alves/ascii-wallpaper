@@ -1,5 +1,6 @@
-# Removes the startup entry and stops the running wallpaper.
+# Removes the wallpaper from startup and stops it.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'AsciiWallpaper' -ErrorAction SilentlyContinue
-& python (Join-Path $here 'ascii_wallpaper.pyw') --stop
+$script = Join-Path $here 'ascii_wallpaper.pyw'
+& python $script --startup off
+& python $script --stop
 Write-Host "ASCII wallpaper stopped and removed from startup."

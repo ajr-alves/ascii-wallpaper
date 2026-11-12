@@ -52,6 +52,8 @@ CreateWindowExW = _f(user32, "CreateWindowExW", wt.HWND, wt.DWORD, wt.LPCWSTR, w
 DefWindowProcW = _f(user32, "DefWindowProcW", LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 DestroyWindow = _f(user32, "DestroyWindow", wt.BOOL, wt.HWND)
 IsWindow = _f(user32, "IsWindow", wt.BOOL, wt.HWND)
+GetWindow = _f(user32, "GetWindow", wt.HWND, wt.HWND, wt.UINT)
+GW_HWNDNEXT = 2
 FindWindowW = _f(user32, "FindWindowW", wt.HWND, wt.LPCWSTR, wt.LPCWSTR)
 FindWindowExW = _f(user32, "FindWindowExW", wt.HWND, wt.HWND, wt.HWND, wt.LPCWSTR, wt.LPCWSTR)
 SendMessageTimeoutW = _f(user32, "SendMessageTimeoutW", LRESULT, wt.HWND, wt.UINT, wt.WPARAM,
@@ -224,17 +226,23 @@ def find_desktop_host():
     SendMessageTimeoutW(progman, 0x052C, 0xD, 0x1, SMTO_NORMAL, 1000, ctypes.byref(res))
     SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, ctypes.byref(res))
 
+    # Right after logon Explorer may not have built the desktop yet. Returning None
+    # makes the caller retry a second later instead of attaching to a half-made one.
     exstyle = GetWindowLongPtrW(progman, GWL_EXSTYLE)
     if exstyle & WS_EX_NOREDIRECTIONBITMAP:
         defview = FindWindowExW(progman, None, "SHELLDLL_DefView", None)
         workerw = FindWindowExW(progman, None, "WorkerW", None)
+        if not defview:
+            return None
         return {"mode": "raised", "parent": progman, "defview": defview, "workerw": workerw}
 
-    found = []
+    found, icons = [], []
 
     @WNDENUMPROC
     def cb(h, _):
-        if FindWindowExW(h, None, "SHELLDLL_DefView", None):
+        dv = FindWindowExW(h, None, "SHELLDLL_DefView", None)
+        if dv:
+            icons.append(dv)
             w = FindWindowExW(None, h, "WorkerW", None)
             if w:
                 found.append(w)
@@ -242,8 +250,25 @@ def find_desktop_host():
 
     EnumWindows(cb, 0)
     if found:
-        return {"mode": "legacy", "parent": found[0], "defview": None, "workerw": found[0]}
-    return {"mode": "progman", "parent": progman, "defview": None, "workerw": None}
+        return {"mode": "legacy", "parent": found[0], "defview": icons[0], "workerw": found[0]}
+    if not icons:
+        return None
+    return {"mode": "progman", "parent": progman, "defview": icons[0], "workerw": None}
+
+
+def host_alive(host):
+    """False once Explorer has replaced any window the surfaces depend on."""
+    return all(IsWindow(host[k]) for k in ("parent", "defview", "workerw") if host.get(k))
+
+
+def below(hwnd, other):
+    """True if `other` comes after `hwnd` among its siblings (is drawn under it)."""
+    h = GetWindow(hwnd, GW_HWNDNEXT)
+    while h:
+        if h == other:
+            return True
+        h = GetWindow(h, GW_HWNDNEXT)
+    return False
 
 
 def list_monitors():
@@ -290,6 +315,7 @@ class Surface:
     def __init__(self, monitor, host, font, font_size, bg, preview=False):
         register_classes()
         self.monitor = monitor
+        self.host = host
         self.alive = True
         self.on_close = None
         hinst = GetModuleHandleW(None)
@@ -403,7 +429,18 @@ class Surface:
         ReleaseDC(self.hwnd, hdc)
 
     def is_valid(self):
-        return self.alive and bool(IsWindow(self.hwnd))
+        if not (self.alive and IsWindow(self.hwnd)):
+            return False
+        host = self.host
+        if not host:
+            return True
+        if not host_alive(host):
+            return False
+        # Explorer sometimes re-stacks its windows while the session is still
+        # starting; if the wallpaper WorkerW ends up above us we are hidden.
+        if host["mode"] == "raised" and host["workerw"]:
+            return below(self.hwnd, host["workerw"])
+        return True
 
     def destroy(self):
         if self.memdc:

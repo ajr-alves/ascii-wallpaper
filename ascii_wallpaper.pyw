@@ -13,7 +13,9 @@ import json
 import logging
 import os
 import random
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import winreg
@@ -133,25 +135,93 @@ def pythonw_path():
     return cand if os.path.exists(cand) else exe
 
 
-def startup_enabled():
+# Startup uses a Task Scheduler "at log on" task: programs in the registry Run key
+# are held back by Windows for a minute or more after logon, a logon task is not.
+# The Run key stays as a fallback for machines where the task can't be created.
+
+TASK_NAME = "AsciiWallpaper"
+
+
+def _schtasks(*args):
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            winreg.QueryValueEx(k, RUN_NAME)
+        r = subprocess.run(["schtasks", *args], capture_output=True, text=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=20)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _task_xml():
+    user = "%s\\%s" % (os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", ""))
+    esc = lambda s: (s.replace("&", "&amp;").replace("<", "&lt;")
+                     .replace(">", "&gt;").replace('"', "&quot;"))
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>ASCII live wallpaper</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>{esc(user)}</UserId></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{esc(user)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{esc(pythonw_path())}</Command>
+      <Arguments>"{esc(SCRIPT_PATH)}"</Arguments>
+      <WorkingDirectory>{esc(os.path.dirname(SCRIPT_PATH))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _run_key(value=None, delete=False):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as k:
+            if delete:
+                winreg.DeleteValue(k, RUN_NAME)
+            elif value is not None:
+                winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, value)
+            else:
+                winreg.QueryValueEx(k, RUN_NAME)
             return True
     except OSError:
         return False
 
 
+def startup_enabled():
+    return _schtasks("/Query", "/TN", TASK_NAME) or _run_key()
+
+
 def set_startup(on):
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-        if on:
-            winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ,
-                              '"%s" "%s"' % (pythonw_path(), SCRIPT_PATH))
-        else:
-            try:
-                winreg.DeleteValue(k, RUN_NAME)
-            except OSError:
-                pass
+    if not on:
+        _schtasks("/Delete", "/TN", TASK_NAME, "/F")
+        _run_key(delete=True)
+        return
+    path = os.path.join(tempfile.gettempdir(), "ascii_wallpaper_task.xml")
+    with open(path, "w", encoding="utf-16") as f:
+        f.write(_task_xml())
+    try:
+        ok = _schtasks("/Create", "/TN", TASK_NAME, "/XML", path, "/F")
+    finally:
+        os.remove(path)
+    if ok:
+        _run_key(delete=True)   # one launcher is enough
+    else:
+        logging.warning("could not create logon task, using the Run key instead")
+        _run_key('"%s" "%s"' % (pythonw_path(), SCRIPT_PATH))
 
 
 def label(name):
@@ -486,11 +556,17 @@ def main():
     ap.add_argument("--stop", action="store_true")
     ap.add_argument("--scene")
     ap.add_argument("--light", action="store_true", help="preview the off-white mode")
+    ap.add_argument("--startup", choices=["on", "off"], help="start with Windows, then exit")
     args = ap.parse_args()
 
     logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     desktop.set_dpi_aware()
+    if args.startup:
+        set_startup(args.startup == "on")
+        print("start with Windows:", "on" if startup_enabled() else "off",
+              "(logon task)" if _schtasks("/Query", "/TN", TASK_NAME) else "")
+        return
     if args.stop:
         stop_existing()
         return
