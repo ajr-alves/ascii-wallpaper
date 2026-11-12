@@ -357,6 +357,60 @@ def session_locked():
         CloseDesktop(h)
 
 
+# --------------------------------------------------------------------------- taskbar
+#
+# Windows 11 draws its taskbar in XAML and ignores the old per-window
+# transparency trick, so this sticks to what Windows supports: the taskbar's
+# dark/light setting and auto-hide.
+
+_PERSONALIZE = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+
+def taskbar_light():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE) as k:
+            return bool(winreg.QueryValueEx(k, "SystemUsesLightTheme")[0])
+    except OSError:
+        return False
+
+
+def set_taskbar_light(light):
+    """Switch the taskbar/Start/notification colours between light and dark."""
+    import winreg
+    if taskbar_light() == bool(light):
+        return
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE, 0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, "SystemUsesLightTheme", 0, winreg.REG_DWORD, int(bool(light)))
+    msg = ctypes.create_unicode_buffer("ImmersiveColorSet")
+    res = ULONG_PTR()
+    SendMessageTimeoutW(wt.HWND(0xFFFF), 0x001A, 0, ctypes.addressof(msg),   # WM_SETTINGCHANGE
+                        0x0002, 1000, ctypes.byref(res))                    # SMTO_ABORTIFHUNG
+
+
+class APPBARDATA(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uCallbackMessage", wt.UINT),
+                ("uEdge", wt.UINT), ("rc", wt.RECT), ("lParam", wt.LPARAM)]
+
+
+shell32 = ctypes.WinDLL("shell32")
+SHAppBarMessage = _f(shell32, "SHAppBarMessage", ULONG_PTR, wt.DWORD, ctypes.POINTER(APPBARDATA))
+ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE = 4, 10, 1
+
+
+def taskbar_autohide():
+    abd = APPBARDATA(ctypes.sizeof(APPBARDATA))
+    abd.hWnd = FindWindowW("Shell_TrayWnd", None)
+    return bool(SHAppBarMessage(ABM_GETSTATE, ctypes.byref(abd)) & ABS_AUTOHIDE)
+
+
+def set_taskbar_autohide(on):
+    abd = APPBARDATA(ctypes.sizeof(APPBARDATA))
+    abd.hWnd = FindWindowW("Shell_TrayWnd", None)
+    abd.lParam = ABS_AUTOHIDE if on else 0
+    SHAppBarMessage(ABM_SETSTATE, ctypes.byref(abd))
+
+
 def efficiency_mode():
     """Ask Windows to run us as a background task: low priority and EcoQoS
     (efficiency cores / low clocks where the CPU has them)."""

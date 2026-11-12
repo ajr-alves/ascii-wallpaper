@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 import desktop  # noqa: E402
 import scenes   # noqa: E402
 import light_scenes  # noqa: E402
+import sysinfo  # noqa: E402
 
 ALL_SCENES = {**scenes.SCENES, **light_scenes.SCENES}
 
@@ -50,7 +51,13 @@ DEFAULTS = {
     "clock_position": "bottom-right",
     "clock_24h": True,
     "pause_when_fullscreen": True,
+    "stats": "off",                 # off | top-left | top-right | bottom-left | bottom-right
+    "stats_monitor": "primary",     # primary | all
+    "taskbar_match": False,         # dark/light taskbar following the wallpaper mode
+    "taskbar_restore": None,        # the taskbar setting to put back when matching stops
 }
+
+STATS_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"]
 
 THEMES = {
     "claude": {"bg": "#141413",
@@ -100,8 +107,8 @@ CYCLE_CHOICES = [1, 2, 5, 10, 15, 30, 60]
 
 # tray menu command ids
 (CMD_PAUSE, CMD_NEXT, CMD_CLOCK, CMD_STARTUP, CMD_OPEN, CMD_QUIT, CMD_CYCLE,
- CMD_DARK, CMD_LIGHT) = range(1, 10)
-CMD_SCENE, CMD_ROTATE, CMD_MINUTES, CMD_THEME = 100, 200, 300, 400
+ CMD_DARK, CMD_LIGHT, CMD_ROTATION, CMD_TB_MATCH, CMD_TB_HIDE, CMD_STATS_ALL) = range(1, 14)
+CMD_SCENE, CMD_ROTATE, CMD_MINUTES, CMD_THEME, CMD_STATS = 100, 200, 300, 400, 500
 
 
 def load_config():
@@ -247,6 +254,7 @@ class App:
         self.ctl = desktop.create_control_window(self)
         self.tray = None
         self.icons = None
+        self.sampler = None
         if not preview:
             self.make_tray()
         self.build()
@@ -303,6 +311,7 @@ class App:
             s.set_bg(self.bg)
         if self.preview:
             return
+        self.apply_taskbar()
         theme, _ = resolve_theme(self.cfg["theme"], "dark")   # tray icon always dark
         key = (theme["bg"], theme["accent"][1], theme["ramp"][1])
         if self.icons is None or self.icons[2] != key:
@@ -313,6 +322,39 @@ class App:
             if old:
                 desktop.DestroyIcon(old[0])
                 desktop.DestroyIcon(old[1])
+
+    def apply_taskbar(self):
+        """Keep the taskbar dark/light in step with the wallpaper mode while
+        matching is on; put the user's own setting back when it goes off."""
+        try:
+            if self.cfg["taskbar_match"]:
+                if self.cfg["taskbar_restore"] is None:
+                    self.save_config(taskbar_restore=desktop.taskbar_light())
+                desktop.set_taskbar_light(self.light())
+            elif self.cfg["taskbar_restore"] is not None:
+                desktop.set_taskbar_light(self.cfg["taskbar_restore"])
+                self.save_config(taskbar_restore=None)
+        except Exception:
+            logging.exception("taskbar update failed")
+
+    def stats_on(self):
+        return self.cfg["stats"] in STATS_POSITIONS
+
+    def update_sampler(self):
+        if self.stats_on() and not self.sampler:
+            self.sampler = sysinfo.Sampler()
+        elif not self.stats_on() and self.sampler:
+            self.sampler.close()
+            self.sampler = None
+        if self.sampler:
+            self.sampler.active = not self.user_paused and any(
+                not s.paused for s in self.surfaces)
+
+    def shows_stats(self, s):
+        if not self.sampler:
+            return False
+        return (self.cfg["stats_monitor"] == "all" or self.preview
+                or tuple(s.monitor["rect"][:2]) == (0, 0))
 
     def build(self):
         for s in self.surfaces:
@@ -387,11 +429,23 @@ class App:
                 for i, m in enumerate(CYCLE_CHOICES)]
         themes = [(label(n), CMD_THEME + i, cfg["theme"] == n, True, True)
                   for i, n in enumerate(THEMES)]
+        stats = [("Off", CMD_STATS, not self.stats_on(), True, True)]
+        stats += [(p.replace("-", " ").capitalize(), CMD_STATS + 1 + i, cfg["stats"] == p,
+                   True, True) for i, p in enumerate(STATS_POSITIONS)]
+        stats += [None, ("On every monitor", CMD_STATS_ALL, cfg["stats_monitor"] == "all",
+                         self.stats_on())]
+        try:
+            hidden = desktop.taskbar_autohide()
+        except Exception:
+            hidden = False
+        taskbar = [("Match appearance (dark/light)", CMD_TB_MATCH, bool(cfg["taskbar_match"])),
+                   ("Auto-hide", CMD_TB_HIDE, hidden)]
         return [
             ("ASCII wallpaper", 0, False, False),
             None,
             ("Turn on" if self.user_paused else "Turn off", CMD_PAUSE),
             ("Next scene", CMD_NEXT, False, not self.user_paused),
+            ("Rotate scenes", CMD_ROTATION, cycling),
             None,
             ("Wallpaper (%s)" % ("light" if self.light() else "dark"), wall),
             ("Scenes in rotation", rotate),
@@ -402,6 +456,8 @@ class App:
                 ("Light (off-white)", CMD_LIGHT, cfg.get("mode") == "light", True, True),
             ]),
             ("Show clock", CMD_CLOCK, bool(cfg["clock"])),
+            ("System stats", stats),
+            ("Taskbar", taskbar),
             None,
             ("Start with Windows", CMD_STARTUP, startup_enabled()),
             ("Open settings file", CMD_OPEN),
@@ -455,6 +511,26 @@ class App:
             self.apply_theme()
         elif cmd == CMD_CLOCK:
             self.save_config(clock=not self.cfg["clock"])
+        elif cmd == CMD_ROTATION:
+            if self.cycling():
+                # freeze on whatever the main monitor shows right now
+                shown = [s.scene_name for s in self.surfaces if s.scene_name in names]
+                self.save_config(**{ks: shown[0] if shown else self.scene_name_for(0)})
+            else:
+                self.save_config(**{ks: "cycle"})
+                self.next_switch = now + self.period()
+        elif CMD_STATS <= cmd <= CMD_STATS + len(STATS_POSITIONS):
+            i = cmd - CMD_STATS
+            self.save_config(stats=STATS_POSITIONS[i - 1] if i else "off")
+            self.update_sampler()
+        elif cmd == CMD_STATS_ALL:
+            self.save_config(stats_monitor="primary" if self.cfg["stats_monitor"] == "all"
+                             else "all")
+        elif cmd == CMD_TB_MATCH:
+            self.save_config(taskbar_match=not self.cfg["taskbar_match"])
+            self.apply_taskbar()
+        elif cmd == CMD_TB_HIDE:
+            desktop.set_taskbar_autohide(not desktop.taskbar_autohide())
         elif cmd == CMD_STARTUP:
             set_startup(not startup_enabled())
         elif cmd == CMD_OPEN:
@@ -473,8 +549,10 @@ class App:
             logging.info("config reloaded")
             self.build()
             self.update_tray()
+            self.update_sampler()
             return
         if self.preview or self.user_paused:
+            self.update_sampler()
             return
         broken = not self.surfaces or any(not s.is_valid() for s in self.surfaces)
         mons = desktop.list_monitors()
@@ -491,6 +569,7 @@ class App:
             covered = set()
         for s in self.surfaces:
             s.paused = covered is None or s.monitor["hmon"] in covered
+        self.update_sampler()
 
     def run(self):
         t0 = last = time.perf_counter()
@@ -526,6 +605,9 @@ class App:
                 s.scene.frame(g, t, dt)
                 if cfg["clock"]:
                     scenes.draw_clock(g, cfg["clock_position"], cfg["clock_24h"])
+                if self.shows_stats(s):
+                    sysinfo.draw_panel(g, self.sampler, cfg["stats"],
+                                       cfg["clock_position"] if cfg["clock"] else None)
                 s.draw(*g.out(), self.colors)
             frame = 1.0 / max(1.0, float(cfg["fps"]))
             idle = all(s.paused for s in self.surfaces) if self.surfaces else True
@@ -540,7 +622,15 @@ class App:
         if self.tray:
             self.tray.remove()
             self.tray = None
+        if self.sampler:
+            self.sampler.close()
+            self.sampler = None
         if not self.preview:
+            if self.cfg["taskbar_match"] and self.cfg["taskbar_restore"] is not None:
+                try:
+                    desktop.set_taskbar_light(self.cfg["taskbar_restore"])
+                except Exception:
+                    pass
             desktop.refresh_wallpaper()
 
 
