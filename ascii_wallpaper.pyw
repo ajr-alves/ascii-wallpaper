@@ -483,9 +483,14 @@ class App:
             logging.info("desktop changed (broken=%s), rebuilding", broken)
             self.build()
             return
-        if self.cfg["pause_when_fullscreen"]:
-            for s in self.surfaces:
-                s.paused = desktop.foreground_covers(s.monitor)
+        if desktop.session_locked():
+            covered = None                          # lock screen: nobody sees it
+        elif self.cfg["pause_when_fullscreen"]:
+            covered = desktop.covered_monitors()
+        else:
+            covered = set()
+        for s in self.surfaces:
+            s.paused = covered is None or s.monitor["hmon"] in covered
 
     def run(self):
         t0 = last = time.perf_counter()
@@ -572,6 +577,7 @@ def main():
         return
     if not args.preview:
         stop_existing()
+        desktop.efficiency_mode()
     try:
         App(preview=args.preview, scene_override=args.scene, light=args.light).run()
     except Exception:

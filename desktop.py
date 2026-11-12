@@ -78,6 +78,18 @@ GetForegroundWindow = _f(user32, "GetForegroundWindow", wt.HWND)
 GetWindowRect = _f(user32, "GetWindowRect", wt.BOOL, wt.HWND, ctypes.POINTER(wt.RECT))
 GetClientRect = _f(user32, "GetClientRect", wt.BOOL, wt.HWND, ctypes.POINTER(wt.RECT))
 IsZoomed = _f(user32, "IsZoomed", wt.BOOL, wt.HWND)
+IsIconic = _f(user32, "IsIconic", wt.BOOL, wt.HWND)
+OpenInputDesktop = _f(user32, "OpenInputDesktop", wt.HANDLE, wt.DWORD, wt.BOOL, wt.DWORD)
+CloseDesktop = _f(user32, "CloseDesktop", wt.BOOL, wt.HANDLE)
+GetUserObjectInformationW = _f(user32, "GetUserObjectInformationW", wt.BOOL, wt.HANDLE, _I,
+                               ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD))
+dwmapi = ctypes.WinDLL("dwmapi")
+DwmGetWindowAttribute = _f(dwmapi, "DwmGetWindowAttribute", ctypes.c_long, wt.HWND, wt.DWORD,
+                           ctypes.c_void_p, wt.DWORD)
+DWMWA_CLOAKED = 14
+kernel32.GetCurrentProcess.restype = wt.HANDLE
+kernel32.SetPriorityClass.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.SetProcessInformation.argtypes = [wt.HANDLE, _I, ctypes.c_void_p, wt.DWORD]
 IsWindowVisible = _f(user32, "IsWindowVisible", wt.BOOL, wt.HWND)
 GetClassNameW = _f(user32, "GetClassNameW", _I, wt.HWND, wt.LPWSTR, _I)
 MonitorFromWindow = _f(user32, "MonitorFromWindow", wt.HMONITOR, wt.HWND, wt.DWORD)
@@ -128,7 +140,10 @@ SURFACE_CLASS = "AsciiWallpaperSurface"
 CONTROL_CLASS = "AsciiWallpaperControl"
 TRAY_CLASS = "AsciiWallpaperTray"
 
-_RUNS = re.compile(r"(.)\1*")
+# A run is one colour level plus any empty ('0', always a space) cells between
+# its pieces: text is drawn with a transparent background, so the spaces cost
+# nothing and one TextOut call covers what used to take several.
+_RUNS = re.compile(r"([1-7])(?:0*\1)*")
 
 
 def set_dpi_aware():
@@ -292,19 +307,70 @@ _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd
                   "XamlExplorerHostIslandWindow", "Windows.UI.Core.CoreWindow"}
 
 
-def foreground_covers(monitor):
-    """True when the focused app is maximized/fullscreen on this monitor."""
-    fg = GetForegroundWindow()
-    if not fg or not IsWindowVisible(fg) or class_name(fg) in _SHELL_CLASSES:
+def _cloaked(h):
+    # hidden UWP/virtual-desktop windows report as visible but are "cloaked"
+    v = wt.DWORD()
+    if DwmGetWindowAttribute(h, DWMWA_CLOAKED, ctypes.byref(v), ctypes.sizeof(v)):
         return False
-    if MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) != monitor["hmon"]:
-        return False
-    if IsZoomed(fg):
+    return bool(v.value)
+
+
+def covered_monitors():
+    """hmon values whose desktop is hidden by a maximized or fullscreen window,
+    focused or not, on the current virtual desktop."""
+    found = set()
+
+    @WNDENUMPROC
+    def cb(h, _):
+        if not IsWindowVisible(h) or IsIconic(h) or class_name(h) in _SHELL_CLASSES:
+            return True
+        hmon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)
+        if hmon in found:
+            return True
+        r = wt.RECT()
+        GetWindowRect(h, ctypes.byref(r))
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        GetMonitorInfoW(hmon, ctypes.byref(mi))
+        m, w = mi.rcMonitor, mi.rcWork
+        full = r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom
+        work = r.left <= w.left and r.top <= w.top and r.right >= w.right and r.bottom >= w.bottom
+        if (full or (IsZoomed(h) and work)) and not _cloaked(h):
+            found.add(hmon)
         return True
-    r = wt.RECT()
-    GetWindowRect(fg, ctypes.byref(r))
-    ml, mt, mr, mb = monitor["rect"]
-    return r.left <= ml and r.top <= mt and r.right >= mr and r.bottom >= mb
+
+    EnumWindows(cb, 0)
+    return found
+
+
+def session_locked():
+    """True while the lock screen (or a UAC prompt) owns the input desktop."""
+    h = OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+    if not h:
+        return True
+    try:
+        buf = ctypes.create_unicode_buffer(64)
+        need = wt.DWORD()
+        GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need))  # UOI_NAME
+        return buf.value.lower() != "default"
+    finally:
+        CloseDesktop(h)
+
+
+def efficiency_mode():
+    """Ask Windows to run us as a background task: low priority and EcoQoS
+    (efficiency cores / low clocks where the CPU has them)."""
+    try:
+        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL
+
+        class PPTS(ctypes.Structure):   # PROCESS_POWER_THROTTLING_STATE
+            _fields_ = [("Version", wt.ULONG), ("ControlMask", wt.ULONG),
+                        ("StateMask", wt.ULONG)]
+        st = PPTS(1, 1, 1)  # EXECUTION_SPEED: throttled
+        kernel32.SetProcessInformation(kernel32.GetCurrentProcess(), 4,  # ProcessPowerThrottling
+                                       ctypes.byref(st), ctypes.sizeof(st))
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- surface
@@ -376,6 +442,7 @@ class Surface:
         self.rect = wt.RECT(0, 0, self.w, self.h)
         self.bg_hex = None
         self.brush = None
+        self.prev = None                # last frame drawn, for row diffing
         self.set_bg(bg)
 
     def set_bg(self, bg_hex):
@@ -408,24 +475,45 @@ class Surface:
         return None
 
     def draw(self, char_rows, level_rows, colors):
+        """Render a frame. Only rows that differ from the last frame are redrawn,
+        and only the band of screen they cover is copied; most scenes leave
+        most rows untouched from one frame to the next."""
         dc = self.memdc
-        FillRect(dc, ctypes.byref(self.rect), self.brush)
-        ox, cw, y = self.ox, self.cw, self.oy
+        key = (self.bg_hex, tuple(sorted(colors.items())))
+        prev = self.prev
+        if prev is None or prev[0] != key or len(prev[1]) != len(char_rows):
+            FillRect(dc, ctypes.byref(self.rect), self.brush)
+            old_c = old_l = None
+        else:
+            old_c, old_l = prev[1], prev[2]
+        ox, cw, ch = self.ox, self.cw, self.ch
         current = None
-        for cs, ls in zip(char_rows, level_rows):
+        top = bottom = None
+        row = wt.RECT(0, 0, self.w, 0)
+        for i, (cs, ls) in enumerate(zip(char_rows, level_rows)):
+            if old_c is not None and cs == old_c[i] and ls == old_l[i]:
+                continue
+            y = self.oy + i * ch
+            if top is None:
+                top = y
+            bottom = y + ch
+            if old_c is not None:
+                row.top, row.bottom = y, y + ch
+                FillRect(dc, ctypes.byref(row), self.brush)
             for m in _RUNS.finditer(ls):
-                lv = m.group(1)
-                if lv == "0":
-                    continue
                 s, e = m.span()
-                col = colors[lv]
+                col = colors[m.group(1)]
                 if col != current:
                     SetTextColor(dc, col)
                     current = col
                 TextOutW(dc, ox + s * cw, y, cs[s:e], e - s)
-            y += self.ch
+        self.prev = (key, list(char_rows), list(level_rows))
+        if old_c is None:
+            top, bottom = 0, self.h
+        if top is None:
+            return                      # nothing changed: no copy at all
         hdc = GetDC(self.hwnd)
-        BitBlt(hdc, 0, 0, self.w, self.h, dc, 0, 0, SRCCOPY)
+        BitBlt(hdc, 0, top, self.w, bottom - top, dc, 0, top, SRCCOPY)
         ReleaseDC(self.hwnd, hdc)
 
     def is_valid(self):
