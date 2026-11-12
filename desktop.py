@@ -382,10 +382,34 @@ def set_taskbar_light(light):
         return
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PERSONALIZE, 0, winreg.KEY_SET_VALUE) as k:
         winreg.SetValueEx(k, "SystemUsesLightTheme", 0, winreg.REG_DWORD, int(bool(light)))
-    msg = ctypes.create_unicode_buffer("ImmersiveColorSet")
+    _broadcast_setting("ImmersiveColorSet")
+    if FindWindowW("Shell_SecondaryTrayWnd", None):
+        _rebuild_secondary_taskbars()
+
+
+def _broadcast_setting(name):
+    msg = ctypes.create_unicode_buffer(name)
     res = ULONG_PTR()
     SendMessageTimeoutW(wt.HWND(0xFFFF), 0x001A, 0, ctypes.addressof(msg),   # WM_SETTINGCHANGE
                         0x0002, 1000, ctypes.byref(res))                    # SMTO_ABORTIFHUNG
+
+
+def _rebuild_secondary_taskbars():
+    """Taskbars on other monitors only pick their colours when created, so a
+    dark/light switch leaves them stale. Turning "show taskbar on all displays"
+    off and on again makes Explorer recreate them (they blink once)."""
+    import time
+    import winreg
+    key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0,
+                        winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as k:
+        winreg.SetValueEx(k, "MMTaskbarEnabled", 0, winreg.REG_DWORD, 0)
+        _broadcast_setting("TraySettings")
+        end = time.monotonic() + 2.0
+        while FindWindowW("Shell_SecondaryTrayWnd", None) and time.monotonic() < end:
+            time.sleep(0.05)
+        winreg.SetValueEx(k, "MMTaskbarEnabled", 0, winreg.REG_DWORD, 1)
+        _broadcast_setting("TraySettings")
 
 
 class APPBARDATA(ctypes.Structure):
