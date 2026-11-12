@@ -109,6 +109,7 @@ CYCLE_CHOICES = [1, 2, 5, 10, 15, 30, 60]
 (CMD_PAUSE, CMD_NEXT, CMD_CLOCK, CMD_STARTUP, CMD_OPEN, CMD_QUIT, CMD_CYCLE,
  CMD_DARK, CMD_LIGHT, CMD_ROTATION, CMD_TB_MATCH, CMD_TB_HIDE, CMD_STATS_ALL) = range(1, 14)
 CMD_SCENE, CMD_ROTATE, CMD_MINUTES, CMD_THEME, CMD_STATS = 100, 200, 300, 400, 500
+CMD_STATS_SCREEN = 600          # 601+ = show the stats on that monitor
 
 
 def load_config():
@@ -255,6 +256,7 @@ class App:
         self.tray = None
         self.icons = None
         self.sampler = None
+        self.screen_list = []
         if not preview:
             self.make_tray()
         self.build()
@@ -353,8 +355,14 @@ class App:
     def shows_stats(self, s):
         if not self.sampler:
             return False
-        return (self.cfg["stats_monitor"] == "all" or self.preview
-                or tuple(s.monitor["rect"][:2]) == (0, 0))
+        where = self.cfg["stats_monitor"]
+        if where == "all" or self.preview:
+            return True
+        devices = [m.get("device") for m in (x.monitor for x in self.surfaces)]
+        if where != "primary" and where in devices:
+            return s.monitor.get("device") == where
+        # "primary", or a screen that is no longer connected: use the main one
+        return s.monitor.get("primary", tuple(s.monitor["rect"][:2]) == (0, 0))
 
     def build(self):
         for s in self.surfaces:
@@ -418,6 +426,10 @@ class App:
 
     def menu_spec(self):
         cfg = self.cfg
+        try:
+            self.screen_list = desktop.monitor_labels(desktop.list_monitors())
+        except Exception:
+            self.screen_list = []
         cycling = self.cycling()
         wall = [("Rotate through scenes", CMD_CYCLE, cycling, True, True), None]
         names = list(self.library())
@@ -432,8 +444,15 @@ class App:
         stats = [("Off", CMD_STATS, not self.stats_on(), True, True)]
         stats += [(p.replace("-", " ").capitalize(), CMD_STATS + 1 + i, cfg["stats"] == p,
                    True, True) for i, p in enumerate(STATS_POSITIONS)]
-        stats += [None, ("On every monitor", CMD_STATS_ALL, cfg["stats_monitor"] == "all",
-                         self.stats_on())]
+        where = cfg["stats_monitor"]
+        devices = [dev for dev, _, _ in self.screen_list]
+        screens = [("Every monitor", CMD_STATS_ALL, where == "all", True, True), None]
+        # "primary" (the default) or a monitor that's gone: the main one is ticked
+        screens += [(name, CMD_STATS_SCREEN + 1 + i,
+                     where == dev or (where not in devices and where != "all" and main),
+                     True, True)
+                    for i, (dev, name, main) in enumerate(self.screen_list)]
+        stats += [None, ("Show on", screens)]
         try:
             hidden = desktop.taskbar_autohide()
         except Exception:
@@ -524,8 +543,9 @@ class App:
             self.save_config(stats=STATS_POSITIONS[i - 1] if i else "off")
             self.update_sampler()
         elif cmd == CMD_STATS_ALL:
-            self.save_config(stats_monitor="primary" if self.cfg["stats_monitor"] == "all"
-                             else "all")
+            self.save_config(stats_monitor="all")
+        elif CMD_STATS_SCREEN < cmd <= CMD_STATS_SCREEN + len(self.screen_list):
+            self.save_config(stats_monitor=self.screen_list[cmd - CMD_STATS_SCREEN - 1][0])
         elif cmd == CMD_TB_MATCH:
             self.save_config(taskbar_match=not self.cfg["taskbar_match"])
             self.apply_taskbar()

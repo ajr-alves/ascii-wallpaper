@@ -27,9 +27,9 @@ class WNDCLASSEXW(ctypes.Structure):
                 ("lpszClassName", wt.LPCWSTR), ("hIconSm", wt.HICON)]
 
 
-class MONITORINFO(ctypes.Structure):
+class MONITORINFO(ctypes.Structure):   # MONITORINFOEXW: includes the device name
     _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
-                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD), ("szDevice", wt.WCHAR * 32)]
 
 
 class PAINTSTRUCT(ctypes.Structure):
@@ -296,11 +296,27 @@ def list_monitors():
         GetMonitorInfoW(hmon, ctypes.byref(mi))
         m, w = mi.rcMonitor, mi.rcWork
         mons.append({"hmon": hmon, "rect": (m.left, m.top, m.right, m.bottom),
-                     "work": (w.left, w.top, w.right, w.bottom)})
+                     "work": (w.left, w.top, w.right, w.bottom),
+                     "device": mi.szDevice, "primary": bool(mi.dwFlags & 1)})
         return True
 
     EnumDisplayMonitors(None, None, cb, 0)
     return mons
+
+
+def monitor_labels(mons):
+    """Friendly names in left-to-right order: 'Monitor 1 (left, main)', ..."""
+    order = sorted(mons, key=lambda m: (m["rect"][0], m["rect"][1]))
+    out = []
+    for i, m in enumerate(order):
+        tags = []
+        if len(order) > 1:
+            tags.append("left" if i == 0 else "right" if i == len(order) - 1 else "middle")
+        if m["primary"]:
+            tags.append("main")
+        out.append((m["device"], "Monitor %d%s" % (i + 1, " (%s)" % ", ".join(tags) if tags else ""),
+                    m["primary"]))
+    return out
 
 
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",

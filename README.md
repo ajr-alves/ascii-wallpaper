@@ -82,7 +82,7 @@ Click the **~** icon in the taskbar's hidden-icons area (the **^** arrow next to
 
 ### System stats
 
-An ASCII panel with meters for CPU, memory, GPU, VRAM and disk, the network speed, and a history graph of CPU and GPU load. On NVIDIA cards it also shows the GPU temperature and power draw, read through `nvidia-smi`, which comes with the driver. Windows doesn't let normal programs read the CPU temperature, so the panel doesn't show it. The panel goes on your main monitor, or on every monitor if you choose that. Readings are taken once a second in the background and cost well under 1% of one core.
+An ASCII panel with meters for CPU, memory, GPU, VRAM and disk, the network speed, and a history graph of CPU and GPU load. On NVIDIA cards it also shows the GPU temperature and power draw, read through `nvidia-smi`, which comes with the driver. Windows doesn't let normal programs read the CPU temperature, so the panel doesn't show it. Under "Show on" you choose where it appears: every monitor, or Monitor 1, Monitor 2 and so on, numbered left to right. Until you choose, it shows on your main monitor. Readings are taken once a second in the background and cost well under 1% of one core.
 
 ```
 +-[ system ]-------------------------------+
@@ -129,7 +129,7 @@ The tray menu saves your choices to `config.json` next to the script. You can al
 | `clock`, `clock_position`, `clock_24h` | the big clock; position is `bottom-right`, `bottom-left`, `top-right` or `center` |
 | `pause_when_fullscreen` | stop drawing behind maximized or fullscreen apps |
 | `stats` | `off`, `top-left`, `top-right`, `bottom-left` or `bottom-right` |
-| `stats_monitor` | `primary` or `all` |
+| `stats_monitor` | `all`, `primary`, or a monitor's device name such as `\\.\DISPLAY2` (easiest to set from the menu) |
 | `taskbar_match` | `true` to make the taskbar follow the dark/light mode |
 
 ## Making your own scenes
