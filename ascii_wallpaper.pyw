@@ -107,7 +107,8 @@ CYCLE_CHOICES = [1, 2, 5, 10, 15, 30, 60]
 
 # tray menu command ids
 (CMD_PAUSE, CMD_NEXT, CMD_CLOCK, CMD_STARTUP, CMD_OPEN, CMD_QUIT, CMD_CYCLE,
- CMD_DARK, CMD_LIGHT, CMD_ROTATION, CMD_TB_MATCH, CMD_TB_HIDE, CMD_STATS_ALL) = range(1, 14)
+ CMD_DARK, CMD_LIGHT, CMD_ROTATION, CMD_TB_MATCH, CMD_TB_HIDE, CMD_STATS_ALL,
+ CMD_RESTART) = range(1, 15)
 CMD_SCENE, CMD_ROTATE, CMD_MINUTES, CMD_THEME, CMD_STATS = 100, 200, 300, 400, 500
 CMD_STATS_SCREEN = 600          # 601+ = show the stats on that monitor
 
@@ -479,6 +480,7 @@ class App:
             ("Taskbar", taskbar),
             None,
             ("Start with Windows", CMD_STARTUP, startup_enabled()),
+            ("Restart", CMD_RESTART),
             ("Open settings file", CMD_OPEN),
             ("Quit", CMD_QUIT),
         ]
@@ -555,6 +557,11 @@ class App:
             set_startup(not startup_enabled())
         elif cmd == CMD_OPEN:
             os.startfile(CONFIG_PATH)
+        elif cmd == CMD_RESTART:
+            # a fresh process (also picks up code updates); it closes this one
+            logging.info("restart requested from the tray")
+            subprocess.Popen([pythonw_path(), SCRIPT_PATH], cwd=HERE,
+                             creationflags=subprocess.CREATE_NO_WINDOW)
         elif cmd == CMD_QUIT:
             self.quit = True
         self.update_tray()
@@ -655,12 +662,14 @@ class App:
 
 
 def stop_existing(timeout=4.0):
-    hwnd = desktop.find_running_instance()
-    if not hwnd:
+    """Ask every running copy to close, and wait for them to go."""
+    hwnds = desktop.find_running_instances()
+    if not hwnds:
         return False
-    desktop.PostMessageW(hwnd, desktop.WM_CLOSE, 0, 0)
+    for hwnd in hwnds:
+        desktop.PostMessageW(hwnd, desktop.WM_CLOSE, 0, 0)
     end = time.time() + timeout
-    while time.time() < end and desktop.find_running_instance():
+    while time.time() < end and desktop.find_running_instances():
         time.sleep(0.05)
     return True
 
@@ -687,6 +696,10 @@ def main():
         return
     if not args.preview:
         stop_existing()
+        # the copies just asked to close release this as they exit
+        if not desktop.claim_single_instance(8000):
+            logging.info("another copy is already running; exiting")
+            return
         desktop.efficiency_mode()
     try:
         App(preview=args.preview, scene_override=args.scene, light=args.light).run()

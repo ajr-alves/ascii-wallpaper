@@ -217,6 +217,32 @@ def find_running_instance():
     return FindWindowExW(HWND_MESSAGE, None, CONTROL_CLASS, None)
 
 
+def find_running_instances():
+    found, h = [], None
+    while True:
+        h = FindWindowExW(HWND_MESSAGE, h, CONTROL_CLASS, None)
+        if not h:
+            return found
+        found.append(h)
+
+
+CreateMutexW = _f(kernel32, "CreateMutexW", wt.HANDLE, wt.LPVOID, wt.BOOL, wt.LPCWSTR)
+WaitForSingleObject = _f(kernel32, "WaitForSingleObject", wt.DWORD, wt.HANDLE, wt.DWORD)
+WAIT_OBJECT_0, WAIT_ABANDONED = 0, 0x80
+
+
+def claim_single_instance(timeout_ms):
+    """Hold a named mutex for the life of the process, so only one copy can
+    draw. Returns the handle, or None if another copy kept it for timeout_ms
+    (two copies launched at the same moment: the other one wins)."""
+    h = CreateMutexW(None, False, "Local\\AsciiWallpaper.Instance")
+    if not h:
+        return None
+    if WaitForSingleObject(h, timeout_ms) in (WAIT_OBJECT_0, WAIT_ABANDONED):
+        return h
+    return None
+
+
 def refresh_wallpaper():
     """Ask Windows to repaint the normal wallpaper (used when we exit)."""
     buf = ctypes.create_unicode_buffer(520)
@@ -617,6 +643,12 @@ class Surface:
         if not host:
             return True
         if not host_alive(host):
+            return False
+        # When a monitor wakes up, Explorer can move/resize its desktop window
+        # after we attached, dragging our child windows off their monitor.
+        r = wt.RECT()
+        GetWindowRect(self.hwnd, ctypes.byref(r))
+        if (r.left, r.top, r.right, r.bottom) != tuple(self.monitor["rect"]):
             return False
         # Explorer sometimes re-stacks its windows while the session is still
         # starting; if the wallpaper WorkerW ends up above us we are hidden.
